@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Local AI Chat (on-device, no API)</title>
+<style>
+:root{--bg:#fff;--fg:#1a1a1a;--card:#f3f4f6;--me:#2563eb;--mefg:#fff;--bd:#d1d5db}
+@media(prefers-color-scheme:dark){:root{--bg:#111827;--fg:#f3f4f6;--card:#1f2937;--me:#3b82f6;--bd:#374151}}
+*{box-sizing:border-box}
+html,body{height:100%;margin:0}
+body{background:var(--bg);color:var(--fg);font:16px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;display:flex;flex-direction:column;max-width:760px;margin:0 auto}
+header{padding:10px 14px;border-bottom:1px solid var(--bd)}
+header h1{font-size:1.05rem;margin:0}
+header p{margin:4px 0 0;font-size:.8rem;opacity:.65}
+#bar{display:flex;flex-direction:column;gap:6px;padding:10px 14px;border-bottom:1px solid var(--bd);font-size:.85rem}
+#bar .track{height:8px;border-radius:4px;background:var(--card);overflow:hidden}
+#bar .fill{height:100%;width:0%;background:var(--me);transition:width .2s}
+#log{flex:1;overflow-y:auto;padding:14px;display:flex;flex-direction:column;gap:10px}
+.msg{max-width:85%;padding:9px 13px;border-radius:14px;white-space:pre-wrap;word-wrap:break-word;background:var(--card)}
+.msg.user{align-self:flex-end;background:var(--me);color:var(--mefg)}
+.msg.sys{align-self:center;background:transparent;opacity:.65;font-size:.85rem;max-width:100%;text-align:center}
+.msg.err{border:1px solid #dc2626;color:#dc2626}
+form{display:flex;gap:8px;padding:10px 14px;border-top:1px solid var(--bd)}
+textarea{flex:1;resize:none;max-height:140px;font:inherit;color:inherit;background:var(--card);border:1px solid var(--bd);border-radius:8px;padding:8px 10px}
+button{font:inherit;cursor:pointer;background:var(--me);color:var(--mefg);border:1px solid var(--me);border-radius:8px;padding:8px 14px}
+button:disabled{opacity:.5;cursor:default}
+</style>
+</head>
+<body>
+<header>
+  <h1>🧠 Local AI Chat</h1>
+  <p>Runs fully on your device via WASM — no API key, no server, works offline after first load.</p>
+</header>
+
+<div id="bar">
+  <div id="barLabel">Loading model… this can take a minute on first visit</div>
+  <div class="track"><div class="fill" id="barFill"></div></div>
+</div>
+
+<div id="log"></div>
+
+<form id="form">
+  <textarea id="input" rows="1" placeholder="Type a message…" required></textarea>
+  <button id="send" disabled>Send</button>
+</form>
+
+<script type="module">
+import { pipeline, TextStreamer } from "https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.0.0";
+
+const $ = id => document.getElementById(id);
+const log = $("log"), input = $("input"), send = $("send");
+const bar = $("bar"), barLabel = $("barLabel"), barFill = $("barFill");
+
+// Small instruct model, quantized for CPU/WASM — works on phones, slow but functional.
+const MODEL_ID = "onnx-community/Qwen2.5-0.5B-Instruct";
+
+let generator = null, messages = [], busy = false;
+
+function add(role, text){
+  const d = document.createElement("div");
+  d.className = "msg " + role; d.textContent = text;
+  log.appendChild(d); log.scrollTop = log.scrollHeight;
+  return d;
+}
+
+function pct(done, total){ return total ? Math.round((done/total)*100) : 0; }
+
+async function loadModel(){
+  try{
+    generator = await pipeline("text-generation", MODEL_ID, {
+      dtype: "q4",
+      device: "wasm",
+      progress_callback: (p) => {
+        if(p.status === "progress"){
+          const percent = pct(p.loaded, p.total);
+          barFill.style.width = percent + "%";
+          barLabel.textContent = `Downloading ${p.file || "model"}… ${percent}%`;
+        } else if(p.status === "ready" || p.status === "done"){
+          barLabel.textContent = "Finishing up…";
+        }
+      }
+    });
+    bar.style.display = "none";
+    add("sys", "Model loaded and ready — runs fully offline on this device from now on.");
+    send.disabled = false;
+    input.focus();
+  }catch(err){
+    barLabel.textContent = "Failed to load: " + err.message;
+    add("err", "Could not load the model: " + err.message + ". Try a different browser (latest Chrome or Safari) or check your connection.");
+  }
+}
+
+input.addEventListener("keydown", e => {
+  if(e.key === "Enter" && !e.shiftKey){ e.preventDefault(); $("form").requestSubmit(); }
+});
+input.addEventListener("input", () => { input.style.height = "auto"; input.style.height = input.scrollHeight + "px"; });
+
+$("form").onsubmit = async e => {
+  e.preventDefault();
+  if(busy || !generator) return;
+  const text = input.value.trim(); if(!text) return;
+  input.value = ""; input.style.height = "auto";
+  messages.push({ role: "user", content: text }); add("user", text);
+  const el = add("bot", ""); busy = true; send.disabled = true;
+  let out = "";
+  try{
+    const streamer = new TextStreamer(generator.tokenizer, {
+      skip_prompt: true,
+      skip_special_tokens: true,
+      callback_function: (t) => { out += t; el.textContent = out; log.scrollTop = log.scrollHeight; }
+    });
+    const chatMessages = [{ role: "system", content: "You are a helpful, concise assistant." }, ...messages];
+    await generator(chatMessages, {
+      max_new_tokens: 256,
+      temperature: 0.7,
+      do_sample: true,
+      streamer
+    });
+    if(!out.trim()) throw new Error("Empty response.");
+    messages.push({ role: "assistant", content: out });
+  }catch(err){
+    el.className = "msg err"; el.textContent = "Error: " + err.message;
+    messages.pop();
+  }finally{
+    busy = false; send.disabled = false; input.focus();
+  }
+};
+
+loadModel();
+</script>
+</body>
+</html>
