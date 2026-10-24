@@ -30,7 +30,7 @@ button:disabled{opacity:.5;cursor:default}
 <body>
 <header>
   <h1>🧠 Local AI Chat</h1>
-  <p>Runs fully on your device via WASM — no API key, no server, works offline after first load.</p>
+  <p>Runs fully on your device — no API key, no server. Small model chosen to fit on phones.</p>
 </header>
 
 <div id="bar">
@@ -46,14 +46,18 @@ button:disabled{opacity:.5;cursor:default}
 </form>
 
 <script type="module">
-import { pipeline, TextStreamer } from "https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.0.0";
+import { pipeline, TextStreamer, env } from "https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.0.0";
+
+// Keep memory usage down on low-RAM mobile devices.
+env.backends.onnx.wasm.numThreads = 1;
 
 const $ = id => document.getElementById(id);
 const log = $("log"), input = $("input"), send = $("send");
 const bar = $("bar"), barLabel = $("barLabel"), barFill = $("barFill");
 
-// Small instruct model, quantized for CPU/WASM — works on phones, slow but functional.
-const MODEL_ID = "onnx-community/Qwen2.5-0.5B-Instruct";
+// Very small model (~135M params, ~100MB quantized) — chosen specifically
+// to avoid out-of-memory tab crashes on phones. Quality is basic.
+const MODEL_ID = "onnx-community/SmolLM2-135M-Instruct";
 
 let generator = null, messages = [], busy = false;
 
@@ -69,7 +73,7 @@ function pct(done, total){ return total ? Math.round((done/total)*100) : 0; }
 async function loadModel(){
   try{
     generator = await pipeline("text-generation", MODEL_ID, {
-      dtype: "q4",
+      dtype: "q8",
       device: "wasm",
       progress_callback: (p) => {
         if(p.status === "progress"){
@@ -82,12 +86,12 @@ async function loadModel(){
       }
     });
     bar.style.display = "none";
-    add("sys", "Model loaded and ready — runs fully offline on this device from now on.");
+    add("sys", "Model loaded — runs fully on this device. It's a small model, so keep questions simple and short.");
     send.disabled = false;
     input.focus();
   }catch(err){
     barLabel.textContent = "Failed to load: " + err.message;
-    add("err", "Could not load the model: " + err.message + ". Try a different browser (latest Chrome or Safari) or check your connection.");
+    add("err", "Could not load the model: " + err.message + ". Try reloading, closing other tabs/apps to free memory, or use Chrome instead of an in-app browser.");
   }
 }
 
@@ -110,9 +114,11 @@ $("form").onsubmit = async e => {
       skip_special_tokens: true,
       callback_function: (t) => { out += t; el.textContent = out; log.scrollTop = log.scrollHeight; }
     });
-    const chatMessages = [{ role: "system", content: "You are a helpful, concise assistant." }, ...messages];
+    // Keep only the last few turns — small model, small context, saves memory.
+    const recent = messages.slice(-6);
+    const chatMessages = [{ role: "system", content: "You are a helpful, concise assistant. Keep answers short." }, ...recent];
     await generator(chatMessages, {
-      max_new_tokens: 256,
+      max_new_tokens: 128,
       temperature: 0.7,
       do_sample: true,
       streamer
